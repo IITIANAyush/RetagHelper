@@ -15,13 +15,18 @@ const PORTAL_TAG_MAP = {
   "honours elective":    "E",
   "additional learning": "T",
   "alc":                 "T",
-  "institute elective":  "T",   // best-effort mapping
+  "institute elective":  "IE",   // best-effort mapping
   "non-credit":          "N",
   "audit":               "N",
 };
 function portalTagToCode(raw) {
-  const k = raw.trim().toLowerCase();
-  return PORTAL_TAG_MAP[k] || "T";
+
+    const k = raw
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+
+    return PORTAL_TAG_MAP[k] || "UNKNOWN";
 }
 
 // ── Graduation Requirements State ─────────────────────────────────────────────
@@ -38,13 +43,14 @@ const TAG_META = {
   O:  {label:"Honors Course",             short:"Honors", color:"#c9a227", counts:false},
   E:  {label:"Honors Elective",           short:"Hon. E", color:"#b08040", counts:false},
   N:  {label:"Non-credit",               short:"N/A",    color:"#555555", counts:false},
+  IE: {label:"Institute Elective",        short:"IE",     color:"#6c8cff",counts:true}
 };
 const TAG_TRANSITIONS = {
   T:["D","SE","HE","O","E","M"], C:[], D:["T","O","E"],
-  SE:["T"], HE:["T"], O:["T","D","E"], E:["T","D","O"], M:["T","SE","HE"], N:[],
+  SE:["T"], HE:["T"], O:["T","D","E"], E:["T","D","O"], M:["T","SE","HE"], N:[],IE:["T","SE","D","HE","M","O","E"],
 };
 const GRADE_POINTS = {AA:10,AB:9,BB:8,BC:7,CC:6,CD:5,DD:4,FF:0,FR:0};
-
+const flexTags = ["IE","D","SE","HE"];
 // ── State ─────────────────────────────────────────────────────────────────────
 let data = window.INITIAL_DATA;
 let _uid = 300;
@@ -54,15 +60,24 @@ let modalTargetSemId = null;
 
 // ── Calculations ──────────────────────────────────────────────────────────────
 function calcSPI(courses, useNew) {
-  let ws=0,tc=0;
+  let ws = 0;
+  let tc = 0;
+
   for (const c of courses) {
+
     const tag = useNew ? c.newTag : c.tag;
+
     if (!TAG_META[tag]?.counts) continue;
+
     const gp = GRADE_POINTS[c.grade];
-    if (gp===undefined) continue;
-    ws += gp*c.credits; tc += c.credits;
+
+    if (gp === undefined) continue;
+
+    ws += gp * c.credits;
+    tc += c.credits;
   }
-  return tc>0 ? ws/tc : null;
+
+  return tc > 0 ? ws / tc : null;
 }
 function calcCPI(useNew) {
   let ws=0,tc=0;
@@ -111,6 +126,180 @@ function showToast(msg, isError=false) {
   toastTimer = setTimeout(()=>t.className="", 3000);
 }
 
+function getCurrentCredits() {
+    const result = {
+        core: 0,
+        department: 0,
+        stem: 0,
+        hasmed: 0,
+        flexible: 0
+    };
+
+    for (const sem of data.semesters) {
+        for (const c of sem.courses) {
+
+            const tag = c.newTag;
+
+            if (GRADE_POINTS[c.grade] === undefined)
+                continue;
+
+            switch(tag) {
+                case "C":
+                    result.core += c.credits;
+                    break;
+
+                case "D":
+                    result.department += c.credits;
+                    break;
+
+                case "SE":
+                    result.stem += c.credits;
+                    break;
+
+                case "HE":
+                    result.hasmed += c.credits;
+                    break;
+
+                case "IE":
+                    result.flexible += c.credits;
+                    break;
+            }
+        }
+    }
+
+    return result;
+}
+
+
+function getRemainingCredits() {
+
+    if (!gradReqs)
+        return null;
+
+    const current = getCurrentCredits();
+
+    return {
+        core: Math.max(0, gradReqs.core - current.core),
+        department: Math.max(0, gradReqs.department - current.department),
+        stem: Math.max(0, gradReqs.stem - current.stem),
+        hasmed: Math.max(0, gradReqs.hasmed - current.hasmed),
+        flexible: Math.max(0, gradReqs.flexible - current.flexible)
+    };
+}
+
+
+
+const DEFAULT_GRAD_REQS = {
+  core:       { label: "Core (C)",           tag: "C",  required: 156 },
+  hasmed:     { label: "HASMED (HE)",        tag: "HE", required: 12  },
+  stem:       { label: "STEM (SE)",          tag: "SE", required: 12  },
+  department: { label: "Department (D)",     tag: "D",  required: 36  },
+  flexible:   { label: "Flexible (T/other)", tag: null, required: 36  },
+};
+
+function calcGradProgress() {
+  const reqs = gradReqs || DEFAULT_GRAD_REQS;
+  const tagTotals = {}; // tag → credits (using newTag)
+  let totalCredits = 0;
+  for (const sem of data.semesters) {
+    for (const c of sem.courses) {
+      if (!TAG_META[c.newTag]?.counts && c.newTag !== "T") continue;
+      const gp = GRADE_POINTS[c.grade];
+      if (gp === undefined) continue;
+      tagTotals[c.newTag] = (tagTotals[c.newTag] || 0) + c.credits;
+      totalCredits += c.credits;
+    }
+  }
+  // "Flexible" = everything that counts but isn't C/D/SE/HE
+  const flexTags = Object.keys(TAG_META).filter(t => !["C","D","SE","HE"].includes(t) && TAG_META[t].counts);
+  const flexCredits = flexTags.reduce((s, t) => s + (tagTotals[t] || 0), 0);
+
+  const rows = [];
+  for (const [key, req] of Object.entries(reqs)) {
+    const earned = req.tag ? (tagTotals[req.tag] || 0) : flexCredits;
+    const remaining = Math.max(0, req.required - earned);
+    rows.push({ key, label: req.label, required: req.required, earned, remaining });
+  }
+  return rows;
+}
+
+function openGradModal() {
+  const reqs = gradReqs || DEFAULT_GRAD_REQS;
+  document.getElementById("grad-core").value    = reqs.core.required;
+  document.getElementById("grad-hasmed").value  = reqs.hasmed.required;
+  document.getElementById("grad-stem").value    = reqs.stem.required;
+  document.getElementById("grad-dept").value    = reqs.department.required;
+  document.getElementById("grad-flex").value    = reqs.flexible.required;
+  document.getElementById("grad-modal").style.display = "flex";
+  renderGradProgress();
+}
+function saveGradReqs() {
+  gradReqs = {
+    core:       { label: "Core (C)",           tag: "C",  required: +document.getElementById("grad-core").value   || 156 },
+    hasmed:     { label: "HASMED (HE)",        tag: "HE", required: +document.getElementById("grad-hasmed").value || 12  },
+    stem:       { label: "STEM (SE)",          tag: "SE", required: +document.getElementById("grad-stem").value   || 12  },
+    department: { label: "Department (D)",     tag: "D",  required: +document.getElementById("grad-dept").value   || 36  },
+    flexible:   { label: "Flexible (T/other)", tag: null, required: +document.getElementById("grad-flex").value   || 36  },
+  };
+  renderGradProgress();
+  closeModal("grad-modal");
+  renderCreditStrip();
+  updateTopbar();
+  showToast("✓ Graduation requirements updated!");
+
+}
+function renderGradProgress() {
+  const rows = calcGradProgress();
+
+  const current = getCurrentCredits();
+  const remaining = getRemainingCredits();
+  const totalReq  = rows.reduce((s,r) => s + r.required, 0);
+  const totalEarn = rows.reduce((s,r) => s + r.earned, 0);
+  const totalRem  = rows.reduce((s,r) => s + r.remaining, 0);
+
+  const barHtml = rows.map(r => {
+    const pct = Math.min(100, Math.round((r.earned / r.required) * 100));
+    const done = r.remaining === 0;
+    const barColor = done ? "var(--green)" : r.earned > 0 ? "var(--amber)" : "var(--red)";
+    return `
+    <div class="grad-row">
+      <div class="grad-label">${r.label}</div>
+      <div class="grad-bar-wrap">
+        <div class="grad-bar-bg">
+          <div class="grad-bar-fill" style="width:${pct}%;background:${barColor}"></div>
+        </div>
+        <span class="grad-bar-pct" style="color:${barColor}">${pct}%</span>
+      </div>
+      <div class="grad-nums">
+        <span style="color:${done?'var(--green)':'var(--text)'}">
+          ${r.earned} / ${r.required} cr
+        </span>
+        ${done
+          ? `<span class="grad-done">✓ Done</span>`
+          : `<span class="grad-need" style="color:var(--amber)">Need ${r.remaining} more cr</span>`}
+      </div>
+    </div>`;
+  }).join("");
+
+  const totalHtml = `
+  <div class="grad-total-row">
+    <span>Total:</span>
+    <span style="font-weight:800;color:${totalRem===0?'var(--green)':'var(--amber)'}">
+      ${totalEarn} / ${totalReq} credits
+    </span>
+    <span style="color:${totalRem===0?'var(--green)':'var(--amber)'}">
+      ${totalRem===0 ? "🎓 All requirements met!" : `${totalRem} credits remaining`}
+    </span>
+  </div>`;
+
+  const body = document.getElementById("grad-body");
+  if (body) body.innerHTML = barHtml + totalHtml;
+}
+
+
+
+
+
 // ── Credit strip (under topbar) ───────────────────────────────────────────────
 function renderCreditStrip() {
   const origTags = tagCredits(false);
@@ -138,7 +327,46 @@ function renderCreditStrip() {
     </div>`;
   });
   document.getElementById("credit-strip").innerHTML = totalHtml + items.join("");
-}
+
+};
+
+const items = allTags.map(tag => {
+
+    const m = TAG_META[tag];
+    if (!m) return "";
+
+    const earned = newTags[tag] || 0;
+
+    const req = reqMap[tag];
+
+    let progressText = `${earned} cr`;
+
+    if (req) {
+        progressText =
+            `${earned}/${req.required}`;
+
+        if (req.remaining === 0)
+            progressText += ` ✓`;
+        else
+            progressText += ` (-${req.remaining})`;
+    }
+
+    return `
+    <div class="cstrip-item">
+      <span class="cstrip-badge"
+            style="background:${m.color}22;
+                   color:${m.color};
+                   border:1px solid ${m.color}44">
+          ${m.short}
+      </span>
+
+      <span class="cstrip-cr">${progressText}</span>
+    </div>`;
+});
+
+
+
+
 
 // ── Topbar scores ─────────────────────────────────────────────────────────────
 function updateTopbar() {
@@ -176,6 +404,7 @@ function updateTopbar() {
     origCPI!==null?origCPI*0.4:null, newCPI!==null?newCPI*0.4:null);
 
   renderCreditStrip();
+  renderGradProgress();
 }
 
 // ── Legend ────────────────────────────────────────────────────────────────────
@@ -526,7 +755,17 @@ function parsePortalHTML(htmlText) {
     }
     // Find the nearest following table
     let sib = h3.nextElementSibling;
-    while (sib && sib.tagName !== "TABLE") sib = sib.nextElementSibling;
+
+    while (
+        sib &&
+        (
+            sib.tagName !== "TABLE" ||
+            sib.querySelectorAll("tr").length < 2
+        )
+    ) {
+        sib = sib.nextElementSibling;
+    }
+    
     if (!sib) continue;
 
     const courses = [];
@@ -599,105 +838,6 @@ function importFromPortalHTML(event) {
 
 // ── Graduation Requirements ───────────────────────────────────────────────────
 // Default profile for IIT Bombay AE B.Tech (user can override in the modal)
-const DEFAULT_GRAD_REQS = {
-  core:       { label: "Core (C)",           tag: "C",  required: 156 },
-  hasmed:     { label: "HASMED (HE)",        tag: "HE", required: 12  },
-  stem:       { label: "STEM (SE)",          tag: "SE", required: 12  },
-  department: { label: "Department (D)",     tag: "D",  required: 36  },
-  flexible:   { label: "Flexible (T/other)", tag: null, required: 36  },
-};
-
-function calcGradProgress() {
-  const reqs = gradReqs || DEFAULT_GRAD_REQS;
-  const tagTotals = {}; // tag → credits (using newTag)
-  let totalCredits = 0;
-  for (const sem of data.semesters) {
-    for (const c of sem.courses) {
-      if (!TAG_META[c.newTag]?.counts && c.newTag !== "T") continue;
-      const gp = GRADE_POINTS[c.grade];
-      if (gp === undefined) continue;
-      tagTotals[c.newTag] = (tagTotals[c.newTag] || 0) + c.credits;
-      totalCredits += c.credits;
-    }
-  }
-  // "Flexible" = everything that counts but isn't C/D/SE/HE
-  const flexTags = Object.keys(TAG_META).filter(t => !["C","D","SE","HE"].includes(t) && TAG_META[t].counts);
-  const flexCredits = flexTags.reduce((s, t) => s + (tagTotals[t] || 0), 0);
-
-  const rows = [];
-  for (const [key, req] of Object.entries(reqs)) {
-    const earned = req.tag ? (tagTotals[req.tag] || 0) : flexCredits;
-    const remaining = Math.max(0, req.required - earned);
-    rows.push({ key, label: req.label, required: req.required, earned, remaining });
-  }
-  return rows;
-}
-
-function openGradModal() {
-  const reqs = gradReqs || DEFAULT_GRAD_REQS;
-  document.getElementById("grad-core").value    = reqs.core.required;
-  document.getElementById("grad-hasmed").value  = reqs.hasmed.required;
-  document.getElementById("grad-stem").value    = reqs.stem.required;
-  document.getElementById("grad-dept").value    = reqs.department.required;
-  document.getElementById("grad-flex").value    = reqs.flexible.required;
-  document.getElementById("grad-modal").style.display = "flex";
-  renderGradProgress();
-}
-function saveGradReqs() {
-  gradReqs = {
-    core:       { label: "Core (C)",           tag: "C",  required: +document.getElementById("grad-core").value   || 156 },
-    hasmed:     { label: "HASMED (HE)",        tag: "HE", required: +document.getElementById("grad-hasmed").value || 12  },
-    stem:       { label: "STEM (SE)",          tag: "SE", required: +document.getElementById("grad-stem").value   || 12  },
-    department: { label: "Department (D)",     tag: "D",  required: +document.getElementById("grad-dept").value   || 36  },
-    flexible:   { label: "Flexible (T/other)", tag: null, required: +document.getElementById("grad-flex").value   || 36  },
-  };
-  renderGradProgress();
-  showToast("✓ Graduation requirements updated!");
-}
-function renderGradProgress() {
-  const rows = calcGradProgress();
-  const totalReq  = rows.reduce((s,r) => s + r.required, 0);
-  const totalEarn = rows.reduce((s,r) => s + r.earned, 0);
-  const totalRem  = rows.reduce((s,r) => s + r.remaining, 0);
-
-  const barHtml = rows.map(r => {
-    const pct = Math.min(100, Math.round((r.earned / r.required) * 100));
-    const done = r.remaining === 0;
-    const barColor = done ? "var(--green)" : r.earned > 0 ? "var(--amber)" : "var(--red)";
-    return `
-    <div class="grad-row">
-      <div class="grad-label">${r.label}</div>
-      <div class="grad-bar-wrap">
-        <div class="grad-bar-bg">
-          <div class="grad-bar-fill" style="width:${pct}%;background:${barColor}"></div>
-        </div>
-        <span class="grad-bar-pct" style="color:${barColor}">${pct}%</span>
-      </div>
-      <div class="grad-nums">
-        <span style="color:${done?'var(--green)':'var(--text)'}">
-          ${r.earned} / ${r.required} cr
-        </span>
-        ${done
-          ? `<span class="grad-done">✓ Done</span>`
-          : `<span class="grad-need" style="color:var(--amber)">Need ${r.remaining} more cr</span>`}
-      </div>
-    </div>`;
-  }).join("");
-
-  const totalHtml = `
-  <div class="grad-total-row">
-    <span>Total:</span>
-    <span style="font-weight:800;color:${totalRem===0?'var(--green)':'var(--amber)'}">
-      ${totalEarn} / ${totalReq} credits
-    </span>
-    <span style="color:${totalRem===0?'var(--green)':'var(--amber)'}">
-      ${totalRem===0 ? "🎓 All requirements met!" : `${totalRem} credits remaining`}
-    </span>
-  </div>`;
-
-  const body = document.getElementById("grad-body");
-  if (body) body.innerHTML = barHtml + totalHtml;
-}
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 renderAll();

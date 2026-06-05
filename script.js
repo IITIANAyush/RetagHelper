@@ -46,8 +46,8 @@ const TAG_META = {
   IE: {label:"Institute Elective",        short:"IE",     color:"#6c8cff",counts:true}
 };
 const TAG_TRANSITIONS = {
-  T:["D","SE","HE","O","E","M"], C:[], D:["T","O","E"],
-  SE:["T"], HE:["T"], O:["T","D","E"], E:["T","D","O"], M:["T","SE","HE"], N:[],IE:["T","SE","D","HE","M","O","E"],
+  T:["D","SE","HE","O","E","M","IE"], C:[], D:["T","O","E","IE"],
+  SE:["T","IE"], HE:["T","IE"], O:["T","D","E","IE"], E:["T","D","O","IE"], M:["T","SE","HE","IE"], N:[],IE:["T","SE","D","HE","M","O","E"],
 };
 const GRADE_POINTS = {AA:10,AB:9,BB:8,BC:7,CC:6,CD:5,DD:4,FF:0,FR:0};
 const flexTags = ["IE","D","SE","HE"];
